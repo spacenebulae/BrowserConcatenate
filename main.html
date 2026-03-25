@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Large File Video Merger</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 640px; margin: auto; background: #111; color: #eee; }
+        h2 { color: #7cf; }
+        .video-item { border: 1px solid #444; padding: 10px; margin: 5px 0; border-radius: 6px; }
+        button { background: #2a6; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 15px; margin-top: 16px; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        #log { background: #000; color: #0f0; padding: 10px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 20px; border-radius: 6px; }
+        #progress { margin-top: 10px; height: 8px; background: #333; border-radius: 4px; }
+        #progressBar { height: 100%; background: #2a6; border-radius: 4px; width: 0%; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+    <h2>Concatenate Large Videos</h2>
+    <p style="color:#aaa; font-size:13px;">Uses OPFS (on-disk) so multi-GB files don't crash the tab.</p>
+    <input type="file" id="uploader" multiple accept="video/mp4">
+    <div id="fileList"></div>
+    <div id="progress"><div id="progressBar"></div></div>
+    <button id="mergeBtn" disabled>Merge Videos</button>
+    <div id="log">Waiting...</div>
+
+    <!-- Use the modern ESM build of @ffmpeg/ffmpeg 0.12+ -->
+    <script type="module">
+        import { FFmpeg } from 'https://esm.run/@ffmpeg/ffmpeg@0.12.10';
+        import { toBlobURL } from 'https://esm.run/@ffmpeg/util@0.12.1';
+
+        const ffmpeg = new FFmpeg();
+        const uploader = document.getElementById('uploader');
+        const mergeBtn = document.getElementById('mergeBtn');
+        const fileListEl = document.getElementById('fileList');
+        const logBox = document.getElementById('log');
+        const progressBar = document.getElementById('progressBar');
+        let selectedFiles = [];
+
+        const log = (msg) => {
+            logBox.innerHTML += `<div>> ${msg}</div>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        };
+
+        // Show FFmpeg's own progress
+        ffmpeg.on('progress', ({ progress }) => {
+            progressBar.style.width = `${Math.round(progress * 100)}%`;
+        });
+
+        uploader.addEventListener('change', (e) => {
+            selectedFiles = Array.from(e.target.files);
+            fileListEl.innerHTML = '';
+            selectedFiles.forEach((file, i) => {
+                const mb = (file.size / 1024 / 1024).toFixed(1);
+                fileListEl.innerHTML += `<div class="video-item">${i + 1}. ${file.name} <span style="color:#aaa">(${mb} MB)</span></div>`;
+            });
+            mergeBtn.disabled = selectedFiles.length < 2;
+        });
+
+        mergeBtn.addEventListener('click', async () => {
+            mergeBtn.disabled = true;
+            progressBar.style.width = '0%';
+
+            try {
+                log("Loading FFmpeg core...");
+                // Load the multi-threaded core (needs SharedArrayBuffer / COOP headers)
+                // Falls back to single-threaded if not available
+                const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+                await ffmpeg.load({
+                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                });
+
+                // Mount OPFS so files live on disk, not in RAM
+                log("Mounting OPFS (on-disk virtual filesystem)...");
+                const opfsRoot = await navigator.storage.getDirectory();
+                const workDir = await opfsRoot.getDirectoryHandle('ffmpeg_work', { create: true });
+                await ffmpeg.mount('OPFS', '/work', workDir);
+
+                // Stream each file into OPFS — no full ArrayBuffer in RAM
+                let concatContent = '';
+                for (let i = 0; i < selectedFiles.length; i++) {
+                    const file = selectedFiles[i];
+                    const name = `/work/input${i}.mp4`;
+                    log(`Streaming ${file.name} → OPFS (${(file.size / 1e6).toFixed(0)} MB)...`);
+
+                    // Write in 64 MB chunks to stay RAM-friendly
+                    const CHUNK = 64 * 1024 * 1024;
+                    const fileHandle = await workDir.getFileHandle(`input${i}.mp4`, { create: true });
+                    const writable = await fileHandle.createWritable();
+                    let offset = 0;
+                    while (offset < file.size) {
+                        const slice = file.slice(offset, offset + CHUNK);
+                        const buf = await slice.arrayBuffer();
+                        await writable.write(buf);
+                        offset += buf.byteLength;
+                        progressBar.style.width = `${Math.round((offset / file.size) * 30 + i * (30 / selectedFiles.length))}%`;
+                    }
+                    await writable.close();
+                    concatContent += `file '${name}'\n`;
+                }
+
+                // Write the concat list
+                await ffmpeg.writeFile('/work/concat_list.txt', new TextEncoder().encode(concatContent));
+
+                log("Merging (stream copy, no re-encode)...");
+                progressBar.style.width = '60%';
+                await ffmpeg.exec([
+                    '-f', 'concat', '-safe', '0',
+                    '-i', '/work/concat_list.txt',
+                    '-c', 'copy',
+                    '/work/output.mp4'
+                ]);
+
+                // Stream the output directly to a user-chosen save location
+                log("Saving output...");
+                if ('showSaveFilePicker' in window) {
+                    // File System Access API — streams to disk without loading into RAM
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: 'merged_video.mp4',
+                        types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }]
+                    });
+                    const outputHandle = await workDir.getFileHandle('output.mp4');
+                    const outputFile = await outputHandle.getFile();
+                    const writable = await handle.createWritable();
+                    await outputFile.stream().pipeTo(writable);
+                } else {
+                    // Fallback: read into memory (may fail for very large files)
+                    log("⚠ showSaveFilePicker not supported — reading into memory (may fail on huge files)");
+                    const data = await ffmpeg.readFile('/work/output.mp4');
+                    const url = URL.createObjectURL(new Blob([data], { type: 'video/mp4' }));
+                    Object.assign(document.createElement('a'), { href: url, download: 'merged_video.mp4' }).click();
+                }
+
+                progressBar.style.width = '100%';
+                log("✅ Done! File saved.");
+
+            } catch (err) {
+                log(`❌ Error: ${err.message}`);
+                console.error(err);
+            }
+
+            mergeBtn.disabled = false;
+        });
+    </script>
+</body>
+</html>
+```
+
+---
