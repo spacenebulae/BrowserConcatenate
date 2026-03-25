@@ -65,9 +65,12 @@
                 // Load the multi-threaded core (needs SharedArrayBuffer / COOP headers)
                 // Falls back to single-threaded if not available
                 const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+                const workerURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js';
+
                 await ffmpeg.load({
                     coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
                     wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                    workerURL: await toBlobURL(workerURL, 'text/javascript'),
                 });
 
                 // Mount OPFS so files live on disk, not in RAM
