@@ -25,8 +25,8 @@
 
     <!-- Use the modern ESM build of @ffmpeg/ffmpeg 0.12+ -->
     <script type="module">
-        import { FFmpeg } from 'https://esm.run/@ffmpeg/ffmpeg@0.12.10';
-        import { toBlobURL } from 'https://esm.run/@ffmpeg/util@0.12.1';
+        import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+        import { toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
         const ffmpeg = new FFmpeg();
         const uploader = document.getElementById('uploader');
